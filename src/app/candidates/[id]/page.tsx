@@ -43,6 +43,18 @@ interface Candidate {
   created_at: string;
 }
 
+const formatExperience = (exp: string | null): string => {
+  if (!exp) return "Fresher";
+  const clean = exp.trim().toLowerCase();
+  if (["", "-", "0", "0 years", "0 year", "fresher", "none", "no experience", "null"].includes(clean)) {
+    return "Fresher";
+  }
+  if (/^\d+$/.test(clean)) {
+    return `${clean} years`;
+  }
+  return exp;
+};
+
 export default function CandidateDetailPage() {
   const router = useRouter();
   const { id } = useParams();
@@ -68,9 +80,7 @@ export default function CandidateDetailPage() {
     
     const fetchCandidate = async () => {
       setLoading(true);
-      const API_BASE = typeof window !== "undefined"
-        ? `${window.location.protocol}//${window.location.hostname}:8000`
-        : "http://localhost:8000";
+      const API_BASE = "";
       try {
         const response = await fetch(`${API_BASE}/api/candidates/${id}`);
         if (!response.ok) {
@@ -122,9 +132,7 @@ export default function CandidateDetailPage() {
     );
   }
 
-  const API_BASE = typeof window !== "undefined"
-    ? `${window.location.protocol}//${window.location.hostname}:8000`
-    : "http://localhost:8000";
+  const API_BASE = "";
 
   const isPdf = candidate.resume_filename?.toLowerCase().endsWith(".pdf");
   const resumeUrl = candidate.resume_filename 
@@ -178,10 +186,15 @@ export default function CandidateDetailPage() {
                 <p className="text-slate-400 text-lg font-medium mt-1">
                   {candidate.designation || "Software Engineer"} {candidate.current_company ? `at ${candidate.current_company}` : ""}
                 </p>
-                {candidate.experience && (
+                {candidate.status !== "failed" && candidate.status !== "processing" && (
                   <div className="inline-flex items-center gap-1.5 mt-2 text-sm text-indigo-400 bg-indigo-500/10 px-3 py-1 rounded-full border border-indigo-500/20">
                     <Briefcase className="h-4 w-4" />
-                    <span>{candidate.experience} Experience</span>
+                    <span>
+                      {(() => {
+                        const formatted = formatExperience(candidate.experience);
+                        return formatted === "Fresher" ? "Fresher" : `${formatted} Experience`;
+                      })()}
+                    </span>
                   </div>
                 )}
               </div>

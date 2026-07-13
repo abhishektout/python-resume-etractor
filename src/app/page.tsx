@@ -45,6 +45,18 @@ interface Candidate {
   created_at: string;
 }
 
+const formatExperience = (exp: string | null): string => {
+  if (!exp) return "Fresher";
+  const clean = exp.trim().toLowerCase();
+  if (["", "-", "0", "0 years", "0 year", "fresher", "none", "no experience", "null"].includes(clean)) {
+    return "Fresher";
+  }
+  if (/^\d+$/.test(clean)) {
+    return `${clean} years`;
+  }
+  return exp;
+};
+
 interface Stats {
   total_uploaded: number;
   processed: number;
@@ -54,9 +66,7 @@ interface Stats {
 export default function DashboardPage() {
   const router = useRouter();
 
-  const API_BASE = typeof window !== "undefined"
-    ? `${window.location.protocol}//${window.location.hostname}:8000`
-    : "http://localhost:8000";
+  const API_BASE = "";
 
   // Auth state
   const [isAuthenticated, setIsAuthenticated] = useState(false);
@@ -75,7 +85,7 @@ export default function DashboardPage() {
 
   // Upload Queue State
   const [uploading, setUploading] = useState(false);
-  const [uploadQueue, setUploadQueue] = useState<{ filename: string; status: string; error?: string }[]>([]);
+  const [uploadQueue, setUploadQueue] = useState<{ filename: string; status: string; candidate_id?: number; error?: string }[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [isDragOver, setIsDragOver] = useState(false);
 
@@ -151,6 +161,47 @@ export default function DashboardPage() {
     }
   }, [isAuthenticated, candidates, uploadQueue, fetchStats, fetchCandidates]);
 
+  // Poll status of processing files in the queue
+  useEffect(() => {
+    const processingItems = uploadQueue.filter((item) => item.status === "processing" && item.candidate_id);
+    if (processingItems.length === 0) return;
+
+    const interval = setInterval(async () => {
+      let changed = false;
+      const nextQueue = await Promise.all(
+        uploadQueue.map(async (item) => {
+          if (item.status === "processing" && item.candidate_id) {
+            try {
+              const res = await fetch(`${API_BASE}/api/candidates/${item.candidate_id}`);
+              if (res.ok) {
+                const candidate = await res.json();
+                if (candidate && (candidate.status === "processed" || candidate.status === "failed")) {
+                  changed = true;
+                  return {
+                    ...item,
+                    status: candidate.status,
+                    error: candidate.error_message || undefined
+                  };
+                }
+              }
+            } catch (err) {
+              console.error(`Failed to poll status for candidate ${item.candidate_id}:`, err);
+            }
+          }
+          return item;
+        })
+      );
+
+      if (changed) {
+        setUploadQueue(nextQueue);
+        fetchStats();
+        fetchCandidates();
+      }
+    }, 3000);
+
+    return () => clearInterval(interval);
+  }, [uploadQueue, fetchStats, fetchCandidates]);
+
   // Logout Handler
   const handleLogout = () => {
     localStorage.removeItem("talentscan_token");
@@ -220,6 +271,7 @@ export default function DashboardPage() {
             return {
               filename: matchedResult.filename,
               status: matchedResult.status,
+              candidate_id: matchedResult.candidate_id,
               error: matchedResult.error
             };
           }
@@ -560,8 +612,8 @@ export default function DashboardPage() {
                       <td className="p-4 font-semibold text-white group-hover:text-indigo-400 transition">
                         {c.name || <span className="text-slate-650 italic font-normal">Extracting...</span>}
                       </td>
-                      <td className="p-4 text-slate-350">{c.gender || "-"}</td>
-                      <td className="p-4 text-slate-300">{c.experience || "-"}</td>
+                      <td className="p-4 text-slate-355">{c.gender || "-"}</td>
+                      <td className="p-4 text-slate-300">{formatExperience(c.experience)}</td>
                       <td className="p-4">
                         <div className="flex flex-wrap gap-1 max-w-[200px]">
                           {c.skills && c.skills.slice(0, 3).map((s, i) => (

@@ -24,9 +24,7 @@ export default function LoginPage() {
     setError(null);
     setLoading(true);
 
-    const API_BASE = typeof window !== "undefined"
-      ? `${window.location.protocol}//${window.location.hostname}:8000`
-      : "http://localhost:8000";
+    const API_BASE = "";
 
     try {
       const response = await fetch(`${API_BASE}/api/auth/login`, {
