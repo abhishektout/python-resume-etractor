@@ -18,7 +18,8 @@ import {
   AlertTriangle,
   ArrowUpDown,
   Filter,
-  Users
+  Users,
+  Trash2
 } from "lucide-react";
 
 interface Candidate {
@@ -39,6 +40,7 @@ interface Candidate {
   projects: any[];
   certifications: any[];
   summary: string | null;
+  extracted_by: string | null;
   resume_filename: string | null;
   status: string;
   error_message: string | null;
@@ -77,7 +79,7 @@ export default function DashboardPage() {
   const [loading, setLoading] = useState(false);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
-  const [limit] = useState(10);
+  const [limit, setLimit] = useState(10);
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
   const [sortBy, setSortBy] = useState("created_at");
@@ -88,6 +90,7 @@ export default function DashboardPage() {
   const [uploadQueue, setUploadQueue] = useState<{ filename: string; status: string; candidate_id?: number; error?: string }[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [isDragOver, setIsDragOver] = useState(false);
+  const [batchProgress, setBatchProgress] = useState<{ current: number; total: number } | null>(null);
 
   // Authenticate
   useEffect(() => {
@@ -208,10 +211,14 @@ export default function DashboardPage() {
     router.push("/login");
   };
 
-  // Upload handler
+  // Upload handler — chunked batch upload (20 files per request)
+  // Handles 500+ resumes without browser/server timeout
+  const BATCH_SIZE = 20;
+
   const handleFileUpload = async (files: FileList) => {
     if (files.length === 0) return;
     setUploading(true);
+    setBatchProgress(null);
 
     const validFiles: File[] = [];
     const ignoredItems: { filename: string; status: string; error: string }[] = [];
@@ -239,63 +246,75 @@ export default function DashboardPage() {
       return;
     }
 
-    // Add local placeholders to queue
-    const newItems = validFiles.map((f) => ({
-      filename: f.name,
-      status: "processing"
-    }));
+    // Add all files as placeholders upfront
+    const newItems = validFiles.map((f) => ({ filename: f.name, status: "processing" }));
     setUploadQueue((prev) => [...newItems, ...prev]);
 
-    const formData = new FormData();
-    for (let i = 0; i < validFiles.length; i++) {
-      formData.append("files", validFiles[i]);
+    // Split into chunks of BATCH_SIZE
+    const batches: File[][] = [];
+    for (let i = 0; i < validFiles.length; i += BATCH_SIZE) {
+      batches.push(validFiles.slice(i, i + BATCH_SIZE));
     }
 
-    try {
-      const response = await fetch(`${API_BASE}/api/resumes/upload`, {
-        method: "POST",
-        body: formData,
-      });
+    const totalBatches = batches.length;
+    setBatchProgress({ current: 0, total: totalBatches });
 
-      if (!response.ok) {
-        throw new Error("Upload request failed");
+    // Upload each batch sequentially
+    for (let batchIdx = 0; batchIdx < batches.length; batchIdx++) {
+      const batch = batches[batchIdx];
+      setBatchProgress({ current: batchIdx + 1, total: totalBatches });
+
+      const formData = new FormData();
+      batch.forEach((file) => formData.append("files", file));
+
+      try {
+        const response = await fetch(`${API_BASE}/api/resumes/upload`, {
+          method: "POST",
+          body: formData,
+        });
+
+        if (!response.ok) throw new Error(`Batch ${batchIdx + 1} upload failed`);
+
+        const data = await response.json();
+
+        // Update queue items for this batch with real candidate_ids
+        setUploadQueue((prev) => {
+          return prev.map((item) => {
+            const matched = data.results.find(
+              (res: any) => res.filename.startsWith(item.filename.split(".")[0]) && item.status === "processing"
+            );
+            if (matched) {
+              return {
+                filename: matched.filename,
+                status: matched.status,
+                candidate_id: matched.candidate_id,
+                error: matched.error
+              };
+            }
+            return item;
+          });
+        });
+
+      } catch (err: any) {
+        // Mark this batch's files as failed
+        const batchNames = new Set(batch.map((f) => f.name));
+        setUploadQueue((prev) =>
+          prev.map((item) =>
+            batchNames.has(item.filename) && item.status === "processing"
+              ? { ...item, status: "failed", error: err.message || "Upload failed" }
+              : item
+          )
+        );
       }
 
-      const data = await response.json();
-
-      // Update local upload queue with actual results
-      setUploadQueue((prev) => {
-        return prev.map((item) => {
-          const matchedResult = data.results.find((res: any) => res.filename.startsWith(item.filename.split('.')[0]));
-          if (matchedResult) {
-            return {
-              filename: matchedResult.filename,
-              status: matchedResult.status,
-              candidate_id: matchedResult.candidate_id,
-              error: matchedResult.error
-            };
-          }
-          return item;
-        });
-      });
-
-      // Refresh immediately
+      // Refresh after each batch
       fetchStats();
       fetchCandidates();
-
-    } catch (err: any) {
-      setUploadQueue((prev) =>
-        prev.map((item) => {
-          if (newItems.some((n) => n.filename === item.filename)) {
-            return { ...item, status: "failed", error: err.message || "Upload failed" };
-          }
-          return item;
-        })
-      );
-    } finally {
-      setUploading(false);
-      if (fileInputRef.current) fileInputRef.current.value = "";
     }
+
+    setUploading(false);
+    setBatchProgress(null);
+    if (fileInputRef.current) fileInputRef.current.value = "";
   };
 
   // Drag and Drop events
@@ -321,20 +340,83 @@ export default function DashboardPage() {
     window.open(`${API_BASE}/api/candidates/export`, "_blank");
   };
 
-  // Retry parsing trigger
-  const handleRetry = async (candidateId: number) => {
+  // Delete handler
+  const handleDelete = async (candidateId: number, e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!confirm("Are you sure you want to delete this candidate?")) return;
     try {
-      const response = await fetch(`${API_BASE}/api/candidates/${candidateId}/retry`, {
-        method: "POST"
+      const response = await fetch(`${API_BASE}/api/candidates/${candidateId}`, {
+        method: "DELETE"
       });
       if (response.ok) {
         fetchStats();
         fetchCandidates();
       } else {
+        console.error("Failed to delete candidate");
+      }
+    } catch (err) {
+      console.error("Error deleting candidate:", err);
+    }
+  };
+
+  // Retry parsing trigger
+  const handleRetry = async (candidateId: number) => {
+    // Optimistically update candidate status to 'processing'
+    setCandidates((prev) =>
+      prev.map((c) => (c.id === candidateId ? { ...c, status: "processing", error_message: null } : c))
+    );
+    setStats((prev) => ({
+      ...prev,
+      failed: Math.max(0, prev.failed - 1)
+    }));
+
+    try {
+      const response = await fetch(`${API_BASE}/api/candidates/${candidateId}/retry`, {
+        method: "POST"
+      });
+      if (response.ok) {
+        setTimeout(() => {
+          fetchStats();
+          fetchCandidates();
+        }, 1000);
+      } else {
         console.error("Failed to retry candidate parsing");
       }
     } catch (err) {
       console.error("Error retrying candidate parsing:", err);
+    }
+  };
+
+  // Retry all failed candidates
+  const handleRetryAllFailed = async () => {
+    const failedCandidates = candidates.filter((c) => c.status === "failed");
+    if (failedCandidates.length === 0) return;
+
+    // Optimistically update all failed candidates to 'processing'
+    setCandidates((prev) =>
+      prev.map((c) => (c.status === "failed" ? { ...c, status: "processing", error_message: null } : c))
+    );
+    // Optimistically update failed resumes count
+    setStats((prev) => ({
+      ...prev,
+      failed: Math.max(0, prev.failed - failedCandidates.length)
+    }));
+
+    try {
+      // Trigger all retries in parallel without blocking the UI thread
+      failedCandidates.forEach((c) => {
+        fetch(`${API_BASE}/api/candidates/${c.id}/retry`, { method: "POST" }).catch((err) => {
+          console.error(`Failed to retry candidate ${c.id}:`, err);
+        });
+      });
+
+      // Refresh data after a brief delay
+      setTimeout(() => {
+        fetchStats();
+        fetchCandidates();
+      }, 1200);
+    } catch (err) {
+      console.error("Error retrying all failed candidates:", err);
     }
   };
 
@@ -435,8 +517,8 @@ export default function DashboardPage() {
               onDrop={handleDrop}
               onClick={() => fileInputRef.current?.click()}
               className={`flex flex-col items-center justify-center border-2 border-dashed rounded-2xl p-10 cursor-pointer transition text-center h-full min-h-[220px] ${isDragOver
-                  ? "border-indigo-500 bg-indigo-500/5 text-white"
-                  : "border-slate-850 bg-slate-900/20 hover:border-slate-700 hover:bg-slate-900/30 text-slate-400"
+                ? "border-indigo-500 bg-indigo-500/5 text-white"
+                : "border-slate-850 bg-slate-900/20 hover:border-slate-700 hover:bg-slate-900/30 text-slate-400"
                 }`}
             >
               <input
@@ -450,56 +532,28 @@ export default function DashboardPage() {
               <div className="rounded-full bg-slate-900 p-4 border border-slate-800 shadow-inner mb-4">
                 <Upload className={`h-8 w-8 ${isDragOver ? "text-indigo-400 animate-bounce" : "text-slate-400"}`} />
               </div>
-              <h4 className="text-base font-semibold text-white">Upload multiple resumes</h4>
+              <h4 className="text-base font-semibold text-white">Upload 500+ resumes at once</h4>
               <p className="mt-1 text-sm text-slate-500 max-w-sm">
-                Drag and drop your PDF or DOCX files here, or click to browse. Resumes are processed in the background.
+                Drag and drop PDF or DOCX files here, or click to browse. Files are uploaded in smart batches automatically.
               </p>
-            </div>
-          </div>
-
-          {/* Active Processing Queue */}
-          <div className="rounded-2xl border border-slate-900 bg-slate-900/30 p-6 flex flex-col h-[220px] lg:h-auto overflow-hidden">
-            <h4 className="text-sm font-semibold uppercase tracking-wider text-slate-400 mb-3 flex items-center justify-between">
-              <span>Processing Queue</span>
-              {uploading && <Clock className="h-4 w-4 animate-spin text-indigo-400" />}
-            </h4>
-            <div className="flex-1 overflow-y-auto space-y-2 pr-1 custom-scrollbar">
-              {uploadQueue.length === 0 ? (
-                <div className="h-full flex flex-col items-center justify-center text-center text-slate-650 p-4">
-                  <FileText className="h-8 w-8 text-slate-700 mb-2" />
-                  <p className="text-xs">No active uploads in this session</p>
-                </div>
-              ) : (
-                uploadQueue.map((item, idx) => (
-                  <div key={idx} className="flex items-center justify-between p-2 rounded-lg bg-slate-950 border border-slate-900 text-xs">
-                    <span className="font-medium text-slate-300 truncate max-w-[170px]" title={item.filename}>
-                      {item.filename}
-                    </span>
-                    <div className="flex items-center gap-1.5 shrink-0">
-                      {item.status === "processing" && (
-                        <span className="flex items-center gap-1 text-indigo-400">
-                          <RefreshCw className="h-3.5 w-3.5 animate-spin" />
-                          <span>AI Parsing...</span>
-                        </span>
-                      )}
-                      {item.status === "processed" && (
-                        <span className="flex items-center gap-1 text-emerald-500">
-                          <CheckCircle className="h-3.5 w-3.5" />
-                          <span>Done</span>
-                        </span>
-                      )}
-                      {item.status === "failed" && (
-                        <span className="flex items-center gap-1 text-rose-500" title={item.error}>
-                          <AlertTriangle className="h-3.5 w-3.5" />
-                          <span>Failed</span>
-                        </span>
-                      )}
-                    </div>
+              {batchProgress && (
+                <div className="mt-4 w-full max-w-xs">
+                  <div className="flex justify-between text-xs text-slate-400 mb-1">
+                    <span>Uploading batch {batchProgress.current} of {batchProgress.total}</span>
+                    <span>{Math.round((batchProgress.current / batchProgress.total) * 100)}%</span>
                   </div>
-                ))
+                  <div className="w-full bg-slate-800 rounded-full h-1.5">
+                    <div
+                      className="bg-indigo-500 h-1.5 rounded-full transition-all duration-300"
+                      style={{ width: `${(batchProgress.current / batchProgress.total) * 100}%` }}
+                    />
+                  </div>
+                </div>
               )}
             </div>
           </div>
+
+
         </section>
 
         {/* Candidate Table Section */}
@@ -536,10 +590,34 @@ export default function DashboardPage() {
                 </select>
               </div>
 
+              {/* Page Size Select */}
+              <div className="relative shrink-0">
+                <select
+                  value={limit}
+                  onChange={(e) => { setLimit(Number(e.target.value)); setPage(1); }}
+                  className="rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-sm text-slate-300 focus:border-indigo-500 focus:outline-none cursor-pointer"
+                >
+                  <option value={10}>10 per page</option>
+                  <option value={20}>20 per page</option>
+                  <option value={50}>50 per page</option>
+                  <option value={100}>100 per page</option>
+                </select>
+              </div>
+
             </div>
 
             {/* Export & Refresh */}
             <div className="flex gap-3 w-full sm:w-auto justify-end">
+              {candidates.some(c => c.status === 'failed') && (
+                <button
+                  onClick={handleRetryAllFailed}
+                  className="flex items-center gap-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 px-4 py-2 text-sm font-semibold text-white transition shadow shadow-indigo-500/10"
+                >
+                  <RefreshCw className="h-4 w-4" />
+                  <span>Retry All Failed</span>
+                </button>
+              )}
+
               <button
                 onClick={() => { fetchStats(); fetchCandidates(); }}
                 className="p-2 rounded-lg border border-slate-800 bg-slate-950 hover:bg-slate-900 text-slate-400 hover:text-white transition"
@@ -583,7 +661,9 @@ export default function DashboardPage() {
                   <th className="p-4">Phone</th>
                   <th className="p-4">Current Company</th>
                   <th className="p-4 max-w-[200px]">AI Summary</th>
+                  {/* <th className="p-4">Extracted By</th> */}
                   <th className="p-4">Status</th>
+                  <th className="p-4">Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-900/60 bg-slate-950/20">
@@ -647,6 +727,20 @@ export default function DashboardPage() {
                       <td className="p-4 text-slate-400 max-w-[200px] truncate" title={c.summary || ""}>
                         {c.summary || "-"}
                       </td>
+                      {/* <td className="p-4">
+                        {c.extracted_by ? (
+                          <span className={`inline-flex items-center text-[10px] font-medium px-2 py-0.5 rounded-full border ${c.extracted_by.includes('paid')
+                            ? 'bg-violet-500/10 border-violet-500/20 text-violet-400'
+                            : c.extracted_by.includes('gemini')
+                              ? 'bg-blue-500/10 border-blue-500/20 text-blue-400'
+                              : c.extracted_by.includes('groq')
+                                ? 'bg-orange-500/10 border-orange-500/20 text-orange-400'
+                                : 'bg-slate-700/40 border-slate-600 text-slate-400'
+                            }`}>
+                            {c.extracted_by}
+                          </span>
+                        ) : <span className="text-slate-600 text-xs">—</span>}
+                      </td> */}
                       <td className="p-4">
                         {c.status === "processed" && (
                           <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-2 py-0.5 rounded-full">
@@ -679,6 +773,16 @@ export default function DashboardPage() {
                             </button>
                           </div>
                         )}
+                      </td>
+                      <td className="p-4">
+                        <button
+                          onClick={(e) => handleDelete(c.id, e)}
+                          className="inline-flex items-center gap-1 text-[10px] font-semibold text-rose-400 hover:text-white bg-rose-500/10 hover:bg-rose-600/30 border border-rose-500/20 px-2 py-0.5 rounded transition"
+                          title="Delete this candidate"
+                        >
+                          <Trash2 className="h-2.5 w-2.5" />
+                          <span>Delete</span>
+                        </button>
                       </td>
                     </tr>
                   ))

@@ -32,27 +32,42 @@ export const ensureDbInitialized = async () => {
       certifications JSONB DEFAULT '[]'::jsonb,
       summary TEXT,
       resume_filename VARCHAR(512),
+      file_hash VARCHAR(64),
+      extracted_by VARCHAR(100),
       status VARCHAR(50) DEFAULT 'processing',
       error_message TEXT,
-      created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+      created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
     );
   `;
 
+  // Migrations: safely add new columns to existing tables
+  const migrations = [
+    `ALTER TABLE candidates ADD COLUMN IF NOT EXISTS file_hash VARCHAR(64);`,
+    `ALTER TABLE candidates ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP;`,
+    `ALTER TABLE candidates ADD COLUMN IF NOT EXISTS extracted_by VARCHAR(100);`,
+  ];
+
   const createIndices = [
     `CREATE INDEX IF NOT EXISTS idx_candidates_name ON candidates(name);`,
-    `CREATE INDEX IF NOT EXISTS idx_candidates_email ON candidates(email);`
+    `CREATE INDEX IF NOT EXISTS idx_candidates_email ON candidates(email);`,
+    `CREATE INDEX IF NOT EXISTS idx_candidates_file_hash ON candidates(file_hash);`,
+    // Unique constraint on email — only for non-null emails
+    `CREATE UNIQUE INDEX IF NOT EXISTS idx_candidates_email_unique ON candidates(email) WHERE email IS NOT NULL;`,
   ];
 
   try {
     await pool.query(createTableQuery);
+    for (const migration of migrations) {
+      await pool.query(migration);
+    }
     for (const indexQuery of createIndices) {
       await pool.query(indexQuery);
     }
     isInitialized = true;
-    console.log('Database tables and indices initialized successfully.');
+    console.log('Database tables, migrations, and indices initialized successfully.');
   } catch (err) {
     console.error('Error initializing database:', err);
-    // Do not throw here so that build-time pre-rendering doesn't fail, but let it try again on subsequent requests
   }
 };
 
