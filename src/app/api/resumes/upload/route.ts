@@ -39,8 +39,8 @@ export async function POST(request: NextRequest) {
       const filename = file.name;
       const ext = filename.split('.').pop()?.toLowerCase();
 
-      if (ext !== 'pdf' && ext !== 'docx') {
-        results.push({ filename, status: 'ignored', error: 'Only PDF and DOCX files are allowed.' });
+      if (ext !== 'pdf' && ext !== 'docx' && ext !== 'jpg' && ext !== 'jpeg' && ext !== 'png') {
+        results.push({ filename, status: 'ignored', error: 'Only PDF, DOCX, and JPG/JPEG/PNG files are allowed.' });
         continue;
       }
 

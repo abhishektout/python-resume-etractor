@@ -225,13 +225,13 @@ export default function DashboardPage() {
 
     Array.from(files).forEach((file) => {
       const ext = file.name.split(".").pop()?.toLowerCase();
-      if (ext === "pdf" || ext === "docx") {
+      if (ext === "pdf" || ext === "docx" || ext === "jpg" || ext === "jpeg" || ext === "png") {
         validFiles.push(file);
       } else {
         ignoredItems.push({
           filename: file.name,
           status: "failed",
-          error: "Only PDF and DOCX files are allowed."
+          error: "Only PDF, DOCX, and JPG/JPEG/PNG files are allowed."
         });
       }
     });
@@ -526,7 +526,7 @@ export default function DashboardPage() {
                 multiple
                 ref={fileInputRef}
                 onChange={(e) => e.target.files && handleFileUpload(e.target.files)}
-                accept="application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.pdf,.docx"
+                accept="application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.pdf,.docx,image/jpeg,image/png,.jpg,.jpeg,.png"
                 className="hidden"
               />
               <div className="rounded-full bg-slate-900 p-4 border border-slate-800 shadow-inner mb-4">
@@ -534,7 +534,7 @@ export default function DashboardPage() {
               </div>
               <h4 className="text-base font-semibold text-white">Upload 500+ resumes at once</h4>
               <p className="mt-1 text-sm text-slate-500 max-w-sm">
-                Drag and drop PDF or DOCX files here, or click to browse. Files are uploaded in smart batches automatically.
+                Drag and drop PDF, DOCX, or JPG/PNG image files here, or click to browse. Files are uploaded in smart batches automatically.
               </p>
               {batchProgress && (
                 <div className="mt-4 w-full max-w-xs">
@@ -690,7 +690,13 @@ export default function DashboardPage() {
                       className="hover:bg-slate-900/40 cursor-pointer transition border-b border-slate-900/40 group"
                     >
                       <td className="p-4 font-semibold text-white group-hover:text-indigo-400 transition">
-                        {c.name || <span className="text-slate-650 italic font-normal">Extracting...</span>}
+                        {c.name ? c.name : (
+                          c.status === "processing" ? (
+                            <span className="text-slate-600 italic font-normal">Extracting...</span>
+                          ) : (
+                            <span className="text-slate-500 italic font-normal">Name Not Extracted</span>
+                          )
+                        )}
                       </td>
                       <td className="p-4 text-slate-355">{c.gender || "-"}</td>
                       <td className="p-4 text-slate-300">{formatExperience(c.experience)}</td>

@@ -150,18 +150,54 @@ ${text}
 // -------------------------------------------------------
 let geminiBusy = false;
 
-async function callGeminiFree(text: string, apiKey: string): Promise<{ data: ParsedCandidate; extractedBy: string }> {
+async function callGeminiFree(
+  text: string,
+  apiKey: string,
+  imageInfo?: { mimeType: string; data: string } | { mimeType: string; data: string }[] | null
+): Promise<{ data: ParsedCandidate; extractedBy: string }> {
   try {
     providers.gemini.acquireSlotOrThrow();
     console.log(`[Free-AI] Using Gemini 3.1 Flash Lite (${providers.gemini.getStatus()})`);
 
     const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent?key=${apiKey}`;
 
+    const prompt = imageInfo ? `You are a precise resume parser. Extract the candidate's details from the resume image provided.
+Return ONLY valid JSON matching the following schema.
+If any field is missing or not mentioned, set it to null.
+Do not return Markdown. Do not return any explanation. Return only the JSON object.
+
+JSON Schema:
+{
+  "name": "Candidate's full name",
+  "gender": "Candidate's gender (Male, Female, Non-binary). Infer from first name if not explicit. Null if ambiguous.",
+  "email": "Candidate's email address",
+  "phone": "Candidate's phone number",
+  "address": "Candidate's full postal address",
+  "city": "Candidate's city",
+  "state": "Candidate's state or region",
+  "country": "Candidate's country",
+  "experience": "Total professional experience (e.g. '5 years')",
+  "current_company": "Candidate's current or most recent employer",
+  "designation": "Candidate's current or most recent job title",
+  "skills": ["Skill 1", "Skill 2"],
+  "education": [
+    { "degree": "Degree name (e.g. B.Tech, MCA, 12th Grade)", "major": "Field of study or null", "institution": "School/University name or null", "year": 2025 }
+  ],
+  "projects": ["Project Name: Brief Description"],
+  "certifications": ["Certification Name"],
+  "summary": "A concise 2-3 sentence professional summary"
+}` : buildPrompt(text);
+
     const response = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        contents: [{ parts: [{ text: buildPrompt(text) }] }],
+        contents: [{
+          parts: [
+            ...(imageInfo ? (Array.isArray(imageInfo) ? imageInfo.map(img => ({ inlineData: { mimeType: img.mimeType, data: img.data } })) : [{ inlineData: { mimeType: imageInfo.mimeType, data: imageInfo.data } }]) : []),
+            { text: prompt }
+          ]
+        }],
         generationConfig: {
           temperature: 0.1,
           responseMimeType: 'application/json',
@@ -289,10 +325,24 @@ function mergeWithStructure(parsedData: any): ParsedCandidate {
 export async function parseResumeWithFreeTier(
   text: string,
   geminiKey?: string,
-  groqKey?: string
+  groqKey?: string,
+  imageInfo?: { mimeType: string; data: string } | { mimeType: string; data: string }[] | null
 ): Promise<{ data: ParsedCandidate; extractedBy: string }> {
 
   const errors: string[] = [];
+
+  // If it's an image, we MUST use Gemini
+  if (imageInfo) {
+    if (!geminiKey) {
+      throw new Error("Gemini key is required to parse image resumes.");
+    }
+    try {
+      return await callGeminiFree(text, geminiKey, imageInfo);
+    } catch (err: any) {
+      console.warn(`[Free-AI] Gemini image parsing failed: ${err.message}`);
+      throw new Error(`Failed to parse image resume with Gemini: ${err.message}`);
+    }
+  }
 
   // ── Provider 1: Gemini Free ──
   if (geminiKey && providers.gemini.isAvailable() && !geminiBusy) {

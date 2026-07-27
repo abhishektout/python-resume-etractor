@@ -3,6 +3,9 @@ import { query } from './db';
 import { extractText } from './parser';
 import { parseResumeWithGemini } from './ai';
 import { parseResumeWithFreeTier, logFreeProviderStatus } from './ai-free';
+import { execSync } from 'child_process';
+import path from 'path';
+import crypto from 'crypto';
 
 // ── Mode Switch ──────────────────────────────────────────
 // AI_MODE=free  → Gemini Free + Groq Free (₹0, ~15,900 req/day)
@@ -24,17 +27,49 @@ export async function processResumeTask(candidateId: number, filePath: string, f
     // 1. Read file bytes
     const fileBytes = fs.readFileSync(filePath);
 
-    // 2. Extract text from PDF/DOCX
+    const ext = filename.split('.').pop()?.toLowerCase();
+    const isImage = ['jpg', 'jpeg', 'png'].includes(ext || '');
+
     let text = '';
-    try {
-      text = await extractText(fileBytes, filename);
-    } catch (parseErr: any) {
-      console.error(`[Processor] Text extraction failed for ${filename}:`, parseErr);
-      await query(
-        "UPDATE candidates SET status = 'failed', error_message = $1 WHERE id = $2",
-        [`Text extraction failed: ${parseErr.message}`, candidateId]
-      );
-      return;
+    let imageInfo: { mimeType: string; data: string } | { mimeType: string; data: string }[] | null = null;
+
+    if (isImage) {
+      const mimeType = ext === 'png' ? 'image/png' : 'image/jpeg';
+      imageInfo = {
+        mimeType,
+        data: fileBytes.toString('base64')
+      };
+    } else {
+      // 2. Extract text from PDF/DOCX
+      try {
+        text = await extractText(fileBytes, filename);
+        // Fallback for scanned/empty PDFs (less than 100 characters extracted)
+        if (ext === 'pdf' && (!text || text.trim().length < 100)) {
+          console.log(`[Processor] PDF text extraction yielded very short text (${text.trim().length} chars). Using direct PDF vision fallback.`);
+          imageInfo = {
+            mimeType: 'application/pdf',
+            data: fileBytes.toString('base64')
+          };
+          text = '';
+        }
+        // Fallback for scanned/empty DOCX (less than 100 characters extracted)
+        if (ext === 'docx' && (!text || text.trim().length < 100)) {
+          console.log(`[Processor] DOCX text extraction yielded very short text (${text.trim().length} chars). Checking for embedded images.`);
+          const docxImages = getDocxImages(filePath);
+          if (docxImages.length > 0) {
+            console.log(`[Processor] Extracted ${docxImages.length} images from DOCX. Using DOCX vision fallback.`);
+            imageInfo = docxImages;
+            text = '';
+          }
+        }
+      } catch (parseErr: any) {
+        console.error(`[Processor] Text extraction failed for ${filename}:`, parseErr);
+        await query(
+          "UPDATE candidates SET status = 'failed', error_message = $1 WHERE id = $2",
+          [`Text extraction failed: ${parseErr.message}`, candidateId]
+        );
+        return;
+      }
     }
 
     // 3. Call AI — route based on AI_MODE
@@ -44,11 +79,11 @@ export async function processResumeTask(candidateId: number, filePath: string, f
         // ── PAID: Gemini paid tier ──
         console.log(`[Processor] [PAID] Using Gemini paid tier`);
         const model = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
-        aiData = { data: await parseResumeWithGemini(text, GEMINI_API_KEY), extractedBy: `${model} (paid)` };
+        aiData = { data: await parseResumeWithGemini(text, GEMINI_API_KEY, imageInfo), extractedBy: `${model} (paid)` };
       } else {
         // ── FREE: Gemini free + Groq free rotation ──
         logFreeProviderStatus();
-        aiData = await parseResumeWithFreeTier(text, GEMINI_FREE_KEY, GROQ_FREE_KEY);
+        aiData = await parseResumeWithFreeTier(text, GEMINI_FREE_KEY, GROQ_FREE_KEY, imageInfo);
       }
     } catch (aiErr: any) {
       console.error(`[Processor] AI processing failed for ${filename}:`, aiErr);
@@ -57,6 +92,27 @@ export async function processResumeTask(candidateId: number, filePath: string, f
         [`AI processing failed: ${aiErr.message}`, candidateId]
       );
       return;
+    }
+
+    // 3.5 Fallback to Vision if the text-based extraction resulted in a profile with no name
+    if (ext === 'pdf' && !imageInfo && (!aiData.data.name || aiData.data.name.trim() === '')) {
+      console.log(`[Processor] Text-based extraction for ${filename} succeeded but returned NO name. Trying direct PDF vision fallback...`);
+      imageInfo = {
+        mimeType: 'application/pdf',
+        data: fileBytes.toString('base64')
+      };
+      text = '';
+      try {
+        if (AI_MODE === 'paid') {
+          const model = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
+          aiData = { data: await parseResumeWithGemini(text, GEMINI_API_KEY, imageInfo), extractedBy: `${model} (paid)` };
+        } else {
+          aiData = await parseResumeWithFreeTier(text, GEMINI_FREE_KEY, GROQ_FREE_KEY, imageInfo);
+        }
+      } catch (aiErr2: any) {
+        console.warn(`[Processor] PDF vision fallback failed for ${filename}:`, aiErr2);
+        // Continue with original empty data rather than failing completely
+      }
     }
 
     // ── Check email for dedup ──
@@ -132,4 +188,53 @@ export async function processResumeTask(candidateId: number, filePath: string, f
       console.error(`[Processor] Could not write failed status to DB:`, dbErr);
     }
   }
+}
+
+// Extract images from DOCX file if it contains any
+function getDocxImages(filePath: string): { mimeType: string; data: string }[] {
+  const images: { mimeType: string; data: string }[] = [];
+  const tempDirName = `docx_temp_${crypto.randomBytes(4).toString('hex')}`;
+  const tempDir = path.join(process.cwd(), 'public', 'uploads', tempDirName);
+
+  try {
+    // 1. Run unzip command to extract all word/media files
+    execSync(`unzip -j "${filePath}" "word/media/*" -d "${tempDir}" 2>/dev/null`);
+    
+    // 2. Read the extracted files
+    if (fs.existsSync(tempDir)) {
+      const files = fs.readdirSync(tempDir);
+      // Sort files to keep page order if named sequentially (like image1, image2)
+      files.sort((a, b) => {
+        const numA = parseInt(a.replace(/\D/g, '') || '0');
+        const numB = parseInt(b.replace(/\D/g, '') || '0');
+        return numA - numB;
+      });
+
+      for (const file of files) {
+        const fileExt = file.split('.').pop()?.toLowerCase();
+        if (['png', 'jpg', 'jpeg'].includes(fileExt || '')) {
+          const imgPath = path.join(tempDir, file);
+          const buf = fs.readFileSync(imgPath);
+          const mimeType = fileExt === 'png' ? 'image/png' : 'image/jpeg';
+          images.push({
+            mimeType,
+            data: buf.toString('base64')
+          });
+        }
+      }
+    }
+  } catch (err) {
+    console.warn(`[Processor] Failed to extract images from DOCX via unzip:`, err);
+  } finally {
+    // Cleanup temporary folder
+    try {
+      if (fs.existsSync(tempDir)) {
+        fs.rmSync(tempDir, { recursive: true, force: true });
+      }
+    } catch (cleanupErr) {
+      console.warn(`[Processor] Failed to clean up temp dir ${tempDir}:`, cleanupErr);
+    }
+  }
+
+  return images;
 }
